@@ -1,0 +1,4 @@
+Contador1/usuario/senha/contador
+Contador2/usuario/senha/contador
+Contador3/usuario/senha/contador
+Contador4/usuario/senha/contador
