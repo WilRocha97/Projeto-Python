@@ -1,21 +1,32 @@
 # -*- coding: utf-8 -*-
-import time
 from tkinter.filedialog import askopenfilename, askdirectory, Tk
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from functools import wraps
 from pathlib import Path
+
 from pyautogui import alert, confirm, hotkey, pixel
-from threading import Thread
+from threading import Thread, Lock
 from io import BytesIO
-from PIL import Image, ImageDraw
+from PIL import Image
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-import socket, random, os, re, traceback, tempfile, contextlib, OpenSSL.crypto, PySimpleGUI as sg, pandas as pd
-import psutil
+from email.message import EmailMessage
+from smtplib import SMTP_SSL
+from email.utils import make_msgid
+import time, psutil, socket, random, os, re, traceback, tempfile, contextlib, OpenSSL.crypto, PySimpleGUI as sg, pandas as pd
 
+try:
+    from mysql.connector.errors import DatabaseError
+    from _comum.mysql_comum import _create_tables_task_watch, _update_script_status, _update_historico_status
+except:
+    print('Biblioteca "mysql-connector-python" não instalada.')
+    pass
 
-dados_contadores = "V:\\Setor Robô\\Scripts Python\\_comum\\Contadores.txt"
+# Crie um lock global
+lock = Lock()
+
+dados_contadores = "Dados Contadores.txt"
 
 # variáveis globais
 e_dir = Path('execução')
@@ -66,6 +77,7 @@ def barra_de_status(func):
                     break
                 except:
                     pass
+        
         filename = 'V:/Setor Robô/Scripts Python/_comum/Assets/processando_spin_bars.gif'
         im = Image.open(filename)
         
@@ -165,15 +177,27 @@ def barra_de_status(func):
         window.close()
     
     return wrapper
+
+
 _barra_de_status = barra_de_status
 
 
-def time_execution_2(func):
+def _time_execution_monitor(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
+        controle_historico = 'V:\\Setor Robô\\Scripts Python\\_comum\\_Monitoramento\\Histórico\\histórico.txt'
         controle_rotinas = args[0]
+        nome_rotina = controle_rotinas.split('\\')[-1].replace('.txt', '')
         comeco = datetime.now()
+        
         print(f"🕐 Execução iniciada as: {comeco}\n")
+        with open(controle_rotinas, 'w', encoding='latin-1') as f:
+            f.write('[Iniciando notifica]')
+        f = open(controle_historico, 'a', encoding='latin-1')
+        data_hora = datetime.now().strftime('%d/%m/%Y - %H:%M')
+        f.write(f'[{data_hora}] [{nome_rotina}] [Rotina iniciada]\n')
+        f.close()
+        
         try:
             func(*args, **kwargs)
         except:
@@ -181,25 +205,115 @@ def time_execution_2(func):
             traceback_str = traceback.format_exc()
             print(traceback_str)
             if controle_rotinas:
-                with open(controle_rotinas, 'w', encoding='utf-8') as f:
-                    f.write('ERRO')
+                with open(controle_rotinas, 'w', encoding='latin-1') as f:
+                    f.write('[Erro detectado notifica]')
+                f = open(controle_historico, 'a', encoding='latin-1')
+                data_hora = datetime.now().strftime('%d/%m/%Y - %H:%M')
+                f.write(f'[{data_hora}] [{nome_rotina}] [Erro detectado]\n')
+                f.close()
                 while True:
                     time.sleep(1)
+        
+        print(f"\n🕞 Tempo de execução: {datetime.now() - comeco}\n🕖 Encerrado as: {datetime.now()} ")
+        with open(controle_rotinas, 'w', encoding='latin-1') as f:
+            f.write('[Rotina finalizada]')
+        f = open(controle_historico, 'a', encoding='latin-1')
+        data_hora = datetime.now().strftime('%d/%m/%Y - %H:%M')
+        f.write(f'[{data_hora}] [{nome_rotina}] [Rotina finalizada]\n')
+        f.close()
+    
+    return wrapper
+
+
+def _time_execution_monitor_db(func):
+    """ Decorador para monitorar os andamentos da rotina """
+    
+    # conecta no banco de dados
+    try:
+        _create_tables_task_watch()
+        sem_bd = False
+    except DatabaseError:
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
+        print("Erro ao conectar ao banco de dados do TaskWatch, verifique se o mesmo está em execução ou se esta maquina tem permissão para acessao.")
+        sem_bd = True
+        pass
+    
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # recebe os dados da rotina para adicionar no banco de dados e poder monitora-la
+        controle_rotinas = args[0]
+        nome_rotina = controle_rotinas.split('\\')[-1].replace('.txt', '')
+        comeco = datetime.now()
+        
+        print(f"🕐 Execução iniciada as: {comeco}\n")
+        
+        if not sem_bd:
+            # se conseguir se conectar no banco atualiza a tabela de execuções e o histórico
+            _update_script_status(script_name=nome_rotina, status='status-executando', andamentos='Iniciando...')
+            _update_historico_status(script_name=nome_rotina, andamentos='Rotina iniciada')
+        try:
+            # executa o script
+            func(*args, **kwargs)
+        except:
+            if not sem_bd:
+                # se conseguir se conectar no banco atualiza a tabela de execuções e o histórico
+                _update_script_status(script_name=nome_rotina, status='status-error', andamentos='Erro detectado', porcentagem='✖')
+                _update_historico_status(script_name=nome_rotina, andamentos='Erro detectado')
+            # Obtém a pilha de chamadas de volta como uma string
+            traceback_str = traceback.format_exc()
+            print(traceback_str)
+            while True:
+                time.sleep(1)
+        
+        if not sem_bd:
+            # se conseguir se conectar no banco atualiza a tabela de execuções e o histórico
+            _update_script_status(script_name=nome_rotina, status='status-final', andamentos='Rotina finalizada', porcentagem='✔')
+            _update_historico_status(script_name=nome_rotina, andamentos='Rotina finalizada')
         print(f"\n🕞 Tempo de execução: {datetime.now() - comeco}\n🕖 Encerrado as: {datetime.now()} ")
     
     return wrapper
 
 
-# Decorator que mede o tempo de execução de uma função decorada com ela
+def _atualiza_monitor(controle, mensagem='', novo_conteudo=False, atualiza_arquivo=False):
+    try:
+        # atualiza o arquivo de controle para evitar que ative o alerta de ociosidade
+        if atualiza_arquivo:
+            with open(controle, 'r', encoding='latin-1') as f:
+                conteudo_anterior = f.read()
+            with open(controle, 'w', encoding='latin-1') as f:
+                f.write(conteudo_anterior)
+            return
+        
+        if not novo_conteudo:
+            # atualiza o arquivo de controle com algúm aviso caso a rotina esteja mais lente do que normal devido a alguma exceção que a rotina consegue tratar sozinha
+            with open(controle, 'r', encoding='latin-1') as f:
+                conteudo_anterior = f.read()
+                conteudos = re.compile(r'\[ (.+ Restantes) \] ').search(conteudo_anterior)
+                novo_conteudo = f'[ {conteudos.group(1)} ] [{mensagem}]'
+            with open(controle, 'w', encoding='latin-1') as f:
+                f.write(novo_conteudo)
+        else:
+            with open(controle, 'w', encoding='latin-1') as f:
+                f.write(f'{mensagem}')
+    except AttributeError:
+        with open(controle, 'w', encoding='latin-1') as f:
+            f.write(f'[{mensagem}]')
+
+
 def time_execution(func):
+    """Decorator que mede o tempo de execução de uma função decorada com ela"""
+    
     @wraps(func)
     def wrapper():
         comeco = datetime.now()
         print(f"🕐 Execução iniciada as: {comeco}\n")
         func()
         print(f"\n🕞 Tempo de execução: {datetime.now() - comeco}\n🕖 Encerrado as: {datetime.now()} ")
-        
+    
     return wrapper
+
+
 _time_execution = time_execution
 
 '''
@@ -230,6 +344,8 @@ def content_or_soup(func):
         return func(soup, *dump)
     
     return wrapper
+
+
 _content_or_soup = content_or_soup
 
 
@@ -257,13 +373,15 @@ def pfx_to_pem(pfx_path, pfx_psw):
         f_pem.close()
         
         yield t_pem.name
+
+
 _pfx_to_pem = pfx_to_pem
 
 
-# Recebe um cnpj e procura na pasta _cert por um certificado correspondente, caso 'senha is None' tenta os 8 primeiros dígitos do cnpj como senha
-# Retorna o caminho do cert em caso de sucesso
-# Retorna mensagem de erro caso falha
 def which_cert(cnpj, psw=None):
+    """Recebe um cnpj e procura na pasta _cert por um certificado correspondente, caso 'senha is None' tenta os 8 primeiros dígitos do cnpj como senha
+    Retorna o caminho do cert em caso de sucesso retorna mensagem de erro caso falha"""
+    
     c_dir = os.path.join('..', '..', '_cert')
     
     pfxs = tuple(i for i in os.listdir(c_dir) if i[-4:] == '.pfx')
@@ -290,6 +408,8 @@ def which_cert(cnpj, psw=None):
             return pfx, psw
     
     return 'cnpj e/ou senha não correspondentes'
+
+
 _which_cert = which_cert
 
 
@@ -306,12 +426,27 @@ def atualiza_contadores():
     return contadores_dict
 
 
-def _escreve_relatorio_xlsx(texto, local, nome='Relatório', encode='latin-1'):
+def _escreve_relatorio_xlsx(texto, local='execução', nome='Relatório', encode='latin-1'):
     os.makedirs(local, exist_ok=True)
     caminho_arquivo = os.path.join(local, f"{nome}.xlsx")
     
-    try:
-        workbook = load_workbook(caminho_arquivo)
+    # Adquira o lock antes de acessar o arquivo
+    with lock:
+        while True:
+            try:
+                workbook = load_workbook(caminho_arquivo)
+                break
+            except FileNotFoundError:
+                # Se o arquivo não existir, crie-o com pandas e mantenha a formatação
+                df_status = pd.DataFrame([texto])
+                try:
+                    df_status.to_excel(caminho_arquivo, index=False)
+                except:
+                    df_status.to_excel(caminho_arquivo.replace('.xlsx', ' - auxiliar.xlsx'), index=False)
+                
+                return
+            except:
+                pass
         
         sheet = workbook.active
         
@@ -328,18 +463,11 @@ def _escreve_relatorio_xlsx(texto, local, nome='Relatório', encode='latin-1'):
         
         # Salve o workbook
         workbook.save(caminho_arquivo)
-    
-    except FileNotFoundError:
-        # Se o arquivo não existir, crie-o com pandas e mantenha a formatação
-        df_status = pd.DataFrame([texto])
-        try:
-            df_status.to_excel(caminho_arquivo, index=False)
-        except:
-            df_status.to_excel(caminho_arquivo.replace('.xlsx', ' - auxiliar.xlsx'), index=False)
 
 
-# Recebe um texto 'texto' junta com 'end' e escreve num arquivo 'nome'
 def escreve_relatorio_csv(texto, nome='resumo', local=e_dir, end='\n', encode='latin-1'):
+    """Recebe um texto 'texto' junta com 'end' e escreve num arquivo 'nome'"""
+    
     os.makedirs(local, exist_ok=True)
     
     try:
@@ -349,12 +477,14 @@ def escreve_relatorio_csv(texto, nome='resumo', local=e_dir, end='\n', encode='l
     
     f.write(texto + end)
     f.close()
+
+
 _escreve_relatorio_csv = escreve_relatorio_csv
 
 
-# Recebe um cabeçalho 'texto' e escreve
-# no comeco do arquivo 'nome'
 def escreve_header_csv(texto, nome='resumo', local=e_dir, encode='latin-1'):
+    """Recebe um cabeçalho 'texto' e escreve no comeco do arquivo 'nome'"""
+    
     os.makedirs(local, exist_ok=True)
     
     try:
@@ -367,11 +497,13 @@ def escreve_header_csv(texto, nome='resumo', local=e_dir, encode='latin-1'):
             conteudo = f.read()
         with open(os.path.join(local, f"{nome} - auxiliar.csv"), 'w', encoding=encode) as f:
             f.write(texto + '\n' + conteudo)
+
+
 _escreve_header_csv = escreve_header_csv
 
 
-# wrapper para askopenfilename
 def ask_for_file(title='Abrir arquivo', filetypes='*', initialdir=os.getcwd()):
+    """wrapper para askopenfilename"""
     root = Tk()
     root.withdraw()
     root.wm_attributes('-topmost', 1)
@@ -385,8 +517,12 @@ def ask_for_file(title='Abrir arquivo', filetypes='*', initialdir=os.getcwd()):
     return file if file else False
 
 
-# wrapper para askdirectory
+_ask_for_file = ask_for_file
+
+
 def ask_for_dir(title='Abrir pasta'):
+    """wrapper para askdirectory"""
+    
     root = Tk()
     root.withdraw()
     root.wm_attributes('-topmost', 1)
@@ -396,28 +532,30 @@ def ask_for_dir(title='Abrir pasta'):
     )
     
     return folder if folder else False
+
+
 _ask_for_dir = ask_for_dir
 
 
-# Procura pelo indice do primeiro campo da última linha, que deve ser um identificador unico como cpf/cnpj/inscricao, do arquivo de resumo escolhido e o retorna
-#
-# Retorna 0 caso escolha não na caixa de texto ou não encontre o identificador na variável 'idents'
-#
-# Retorna None caso caixa de texto seja fechada ou o arquivo resumo, não seja escolhido ou não consiga abrir o arquivo escolhido
-def where_to_start(idents, encode='latin-1'):
+def where_to_start(idents, encode='latin-1', file=False):
+    """# Procura pelo indice do primeiro campo da última linha, que deve ser um identificador unico como cpf/cnpj/inscricao, do arquivo de resumo escolhido e o
+    retorna 0 caso escolha não na caixa de texto ou não encontre o identificador na variável 'idents'
+    retorna None caso caixa de texto seja fechada ou o arquivo resumo, não seja escolhido ou não consiga abrir o arquivo escolhido"""
+    
     title = 'Execucao anterior'
     text = 'Deseja continuar execucao anterior?'
     
-    res = confirm(title=title, text=text, buttons=('sim', 'não'))
-    if not res:
-        return None
-    if res == 'não':
-        return 0
-    
-    ftypes = [('Plain text files', '*.txt *.csv')]
-    file = ask_for_file(filetypes=ftypes)
     if not file:
-        return None
+        res = confirm(title=title, text=text, buttons=('sim', 'não'))
+        if not res:
+            return None
+        if res == 'não':
+            return 0
+        
+        ftypes = [('Plain text files', '*.txt *.csv')]
+        file = ask_for_file(filetypes=ftypes)
+        if not file:
+            return None
     
     try:
         with open(file, 'r', encoding=encode) as f:
@@ -431,14 +569,14 @@ def where_to_start(idents, encode='latin-1'):
         return idents.index(elem) + 1
     except ValueError:
         return 0
+
+
 _where_to_start = where_to_start
 
 
-def _configura_dados(pasta_final_, andamentos, continuar_rotina=False, nova_planilha=True, empresas_20000=False, colunas_usadas=None, colunas_filtro=None, palavras_filtro=None, filtrar_celulas_em_branco=None):
+def _configura_dados(pasta_final_, andamentos, continuar_rotina=False, nova_planilha=True, planilha_dados=False, empresas_20000=False, colunas_usadas=None, colunas_filtro=None, palavras_filtro=None, filtrar_celulas_em_branco=None):
     def where_to_start_pandas(pasta_final_anterior, planilha_andamentos, df_empresas):
-        if not os.path.isdir(pasta_final_anterior):
-            return 0
-        
+        print(pasta_final_anterior, planilha_andamentos)
         try:
             df_andamentos = pd.read_excel(os.path.join(pasta_final_anterior, planilha_andamentos))
         except:
@@ -469,80 +607,147 @@ def _configura_dados(pasta_final_, andamentos, continuar_rotina=False, nova_plan
         else:
             return 0
     
+    def get_newer_file(folder_path, filename, latest_time, latest_file, latest_folder=None):
+        # Verifica se o arquivo tem extensão .xlsx ou .xls
+        if filename.endswith('.xlsx') or filename.endswith('.xls'):
+            file_path = os.path.join(folder_path, filename)
+            # Obtém a data de modificação do arquivo
+            file_time = os.path.getmtime(file_path)
+            # Compara com a data do arquivo mais recente encontrado até agora
+            if latest_time is None or file_time > latest_time:
+                latest_time = file_time
+                latest_file = filename
+                latest_folder = folder_path
+        
+        return latest_folder, latest_file, latest_time
+    
     def get_latest_excel_file(folder_path='V:\\Setor Robô\\Relatórios\\ae'):
         # Inicializa variáveis para armazenar o nome do arquivo mais recente e sua data de modificação
-        latest_file = None
         latest_time = None
+        latest_file = None
         
         # Itera sobre todos os arquivos na pasta
         for filename in os.listdir(folder_path):
-            # Verifica se o arquivo tem extensão .xlsx ou .xls
-            if filename.endswith('.xlsx') or filename.endswith('.xls'):
-                file_path = os.path.join(folder_path, filename)
-                # Obtém a data de modificação do arquivo
-                file_time = os.path.getmtime(file_path)
-                # Compara com a data do arquivo mais recente encontrado até agora
-                if latest_time is None or file_time > latest_time:
-                    latest_time = file_time
-                    latest_file = filename
+            latest_folder, latest_file, latest_time = get_newer_file(folder_path, filename, latest_time, latest_file)
         
         return os.path.join(folder_path, latest_file)
     
-    planilha_dados = get_latest_excel_file()
+    def get_last_rotine_excel(folder_path):
+        latest_time = None
+        latest_file = None
+        latest_folder = None
+        
+        for pasta_atual, subpastas, arquivos in os.walk(folder_path):
+            # Agora você pode processar os arquivos na pasta atual normalmente
+            for filename in arquivos:
+                latest_folder, latest_file, latest_time = get_newer_file(pasta_atual, filename, latest_time, latest_file, latest_folder)
+        
+        return latest_folder, latest_file
+    
+    comp = datetime.now().strftime('%m-%Y')
+    ano = datetime.now().strftime('%Y')
+    pasta_final_ = os.path.join(pasta_final_, andamentos, ano, comp)
+    contador = 0
+    index = 0
+    pasta_final_anterior = False
+    
     if empresas_20000:
         com_20000 = '(Com empresas acima do código 20000)'
-    else:
+    if not empresas_20000:
         com_20000 = ''
-        
-    comp = datetime.now().strftime('%m-%Y')
-    pasta_final_ = os.path.join(pasta_final_, andamentos, comp)
-    contador = 0
     
-    # iteração para determinar se precisa criar uma pasta nova para armazenar os resultados
-    # toda vês que o programa começar as consultas uma nova pasta será criada para não sobrepor ou misturar as execuções
-    while True:
-        try:
-            pasta_final = os.path.join(pasta_final_, f'Execução{com_20000}')
-            os.makedirs(pasta_final)
-            pasta_final_anterior = False
-            break
-        except:
-            try:
-                contador += 1
-                pasta_final = os.path.join(pasta_final_, f'Execução{com_20000} ({str(contador)})')
-                os.makedirs(pasta_final)
-                if contador - 1 < 1:
-                    pasta = f'Execução{com_20000}'
-                else:
-                    pasta = f'Execução{com_20000} ({str(contador - 1)})'
-                pasta_final_anterior = os.path.join(pasta_final_, pasta)
-                break
-            except:
-                pass
-    
-    if planilha_dados != 'Não se aplica':
-        # abrir a planilha de dados
-        df_empresas, situacao = open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_dados, colunas_usadas, colunas_filtro, palavras_filtro, filtrar_celulas_em_branco)
-        
-        if not situacao:
-            return False, False, False, False
-        
-        if pasta_final_anterior:
-            if continuar_rotina:
-                planilha_andamentos = f'{andamentos}.xlsx'
-                # obtêm o índice do último andamento da execução anterior para continuar
-                index = where_to_start_pandas(pasta_final_anterior, planilha_andamentos, df_empresas)
-                print(index)
-            else:
-                index = 0
-        else:
-            index = 0
-        
-        total_empresas = int(df_empresas.shape[0])
-    else:
+    if planilha_dados == 'Não se aplica':
         index = None
         df_empresas = None
         total_empresas = None
+        
+        # iteração para determinar se precisa criar uma pasta nova para armazenar os resultados
+        # toda vês que o programa começar as consultas uma nova pasta será criada para não sobrepor ou misturar as execuções
+        while True:
+            try:
+                pasta_final = os.path.join(pasta_final_, f'Execução')
+                os.makedirs(pasta_final)
+                break
+            except:
+                try:
+                    contador += 1
+                    pasta_final = os.path.join(pasta_final_, f'Execução ({str(contador)})')
+                    os.makedirs(pasta_final)
+                    break
+                except:
+                    pass
+        
+        return pasta_final, index, df_empresas, total_empresas
+    if not planilha_dados:
+        planilha_dados = get_latest_excel_file()
+    
+    # verifica se existe uma planilha de dados:
+    ultima_pasta, ultima_planilha = get_last_rotine_excel(pasta_final_)
+    
+    # se não tiver uma planilha de andamentos anterior no mês, cria uma nova
+    if not ultima_planilha or not continuar_rotina:
+        print('Não tem andamentos anteriores')
+        while True:
+            try:
+                pasta_final = os.path.join(pasta_final_, f'Execução{com_20000}')
+                os.makedirs(pasta_final)
+                break
+            except:
+                try:
+                    contador += 1
+                    pasta_final = os.path.join(pasta_final_, f'Execução{com_20000} ({str(contador)})')
+                    os.makedirs(pasta_final)
+                    break
+                except:
+                    pass
+    
+    # se tiver, confere se ela é tem mais de 24 horas da última edição
+    else:
+        print('Tem andamentos anteriores')
+        print(ultima_pasta, ultima_planilha)
+        planilha_antiga = confere_data_arquivo(os.path.join(ultima_pasta, ultima_planilha))
+        
+        # se a planilha tiver mais de 24 horas, cria uma nova pasta final
+        if planilha_antiga:
+            print('Andamentos anteriores é muito antigo')
+            # iteração para determinar se precisa criar uma pasta nova para armazenar os resultados
+            # toda vês que o programa começar as consultas uma nova pasta será criada para não sobrepor ou misturar as execuções
+            while True:
+                try:
+                    pasta_final = os.path.join(pasta_final_, f'Execução{com_20000}')
+                    os.makedirs(pasta_final)
+                    break
+                except:
+                    try:
+                        contador += 1
+                        pasta_final = os.path.join(pasta_final_, f'Execução{com_20000} ({str(contador)})')
+                        os.makedirs(pasta_final)
+                        break
+                    except:
+                        pass
+        
+        # se a planilha de andamentos anterior não tiver mais de 24 horas da ultima edição, utiliza ela para capturar o último indice e continuar a execução
+        else:
+            print('Serão usados os andamentos anteriores')
+            pasta_final_anterior = ultima_pasta
+            pasta_final = ultima_pasta
+    
+    # abrir a planilha de dados
+    df_empresas, situacao = open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_dados, colunas_usadas, colunas_filtro, palavras_filtro, filtrar_celulas_em_branco)
+    
+    if not situacao:
+        return False, False, False, False
+    
+    total_empresas = int(df_empresas.shape[0])
+    
+    # se na verificação anterior da planilha de andamentos for encontrada uma planilha e ela não for mais antiga que 24 horas, busca o último indice dela para continuar a rotina atual
+    if pasta_final_anterior:
+        print('Continuando andamentos anteriores, pegando ultimo indice')
+        planilha_andamentos = f'{andamentos}.xlsx'
+        # obtêm o índice do último andamento da execução anterior para continuar
+        index = where_to_start_pandas(pasta_final_anterior, planilha_andamentos, df_empresas)
+        print(index)
+        total_empresas = total_empresas - index
     
     return pasta_final, index, df_empresas, total_empresas
 
@@ -555,7 +760,7 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
     # colunas_usadas = ['column1', 'column2', 'column3']
     
     if nova_planilha:
-        print('pasta: ',planilha_dados)
+        print('pasta: ', planilha_dados)
         df = pd.read_excel(planilha_dados)
         
         # coluna com os códigos do ae
@@ -591,7 +796,7 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
         # Converte a coluna 'CNPJ' para string e remova a parte decimal '.0'. Preencha com zeros à esquerda para garantir 14 dígitos
         df_filtrada['CNPJ'] = df_filtrada['CNPJ'].astype(str).str.replace(r'\.0', '', regex=True).str.zfill(14)
         
-        if andamentos == 'Consulta Débitos Estaduais - Situação do Contribuinte' or andamentos == 'Consulta Certidão Negativa de Débitos Tributários Não Inscritos':
+        if andamentos == 'Consulta Débitos Estaduais' or andamentos == 'Consulta CND Não Inscritos':
             contadores_dict = atualiza_contadores()
             # Substituir valores com base no dicionário apenas se o valor estiver presente no dicionário
             df_filtrada['Perfil'] = 'vazio'
@@ -603,6 +808,13 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
                 else:
                     return row['PostoFiscalUsuario'], row['PostoFiscalSenha'], 'contribuinte'
             
+            # Função para atualizar os valores das colunas com base no dicionário de mapeamento
+            def substitui_contribuinte(row):
+                if row['Perfil'] == 'contribuinte':
+                    return contadores_dict['principal']
+                else:
+                    return row['PostoFiscalUsuario'], row['PostoFiscalSenha'], row['Perfil']
+            
             # Aplicar a função para atualizar os valores das colunas
             df_filtrada[['PostoFiscalUsuario', 'PostoFiscalSenha', 'Perfil']] = df_filtrada.apply(atualizar_valores, axis=1, result_type='expand')
             
@@ -612,8 +824,11 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
             # 3. Deletar linhas com células vazias na coluna 'senha'
             df_filtrada = df_filtrada.dropna(subset=['PostoFiscalSenha'])
             
+            # Aplicar a função para atualizar os valores das colunas
+            df_filtrada[['PostoFiscalUsuario', 'PostoFiscalSenha', 'Perfil']] = df_filtrada.apply(substitui_contribuinte, axis=1, result_type='expand')
+            
             # Ordene o DataFrame com base na coluna desejada
-            df_filtrada = df_filtrada.sort_values(by=['Perfil', 'PostoFiscalUsuario', 'CNPJ'], ascending=[True, True, True])
+            df_filtrada = df_filtrada.sort_values(by=['PostoFiscalUsuario', 'CNPJ'], ascending=[True, True])
             
             # remove linha com células vazias
             df_filtrada = df_filtrada.dropna(axis=0, how='any')
@@ -633,10 +848,10 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
         
         for coluna in df_filtrada.columns:
             # Remova aspas duplas
-            df_filtrada[coluna] = df_filtrada[coluna].str.replace('"', '')
+            df_filtrada[coluna] = df_filtrada[coluna].astype(str).str.replace('"', '')
             
             # Remova quebras de linha (`\n` e `\r`)
-            df_filtrada[coluna] = df_filtrada[coluna].str.replace('\n', '').str.replace('\r', '').str.replace('_x000D_', '')
+            df_filtrada[coluna] = df_filtrada[coluna].astype(str).str.replace('\n', '').str.replace('\r', '').str.replace('_x000D_', '')
         
         df_filtrada.to_excel(dados_final, index=False)
         empresas = pd.read_excel(dados_final)
@@ -647,10 +862,10 @@ def open_dados(nova_planilha, andamentos, empresas_20000, pasta_final, planilha_
     return empresas, True
 
 
-# Abre uma janela de seleção de arquivos e abre o arquivo selecionado
-# Retorna List de Tuple das linhas dividas por ';' do arquivo caso sucesso
-# Retorna None caso nenhum selecionado ou erro ao ler arquivo
 def open_lista_dados(i_dir='ignore', encode='latin-1', file=False, retorna_planilha=False):
+    """Abre uma janela de seleção de arquivos e abre o arquivo selecionado retorna List de Tuple das linhas dividas por ';' do arquivo caso sucesso
+    Retorna None caso nenhum selecionado ou erro ao ler arquivo"""
+    
     ftypes = [('Plain text files', '*.txt *.csv')]
     
     if not file:
@@ -670,38 +885,45 @@ def open_lista_dados(i_dir='ignore', encode='latin-1', file=False, retorna_plani
         return list(map(lambda x: tuple(x.replace('\n', '').split(';')), dados)), file
     else:
         return list(map(lambda x: tuple(x.replace('\n', '').split(';')), dados))
+
+
 _open_lista_dados = open_lista_dados
 
 
-# Recebe o 'response' de um request e salva o conteudo num arquivo 'name' na pasta 'pasta'
-# Retorna True em caso de sucesso
-# Levanta uma exceção em caso de erro
 def download_file(name, response, pasta=str(e_dir / 'docs')):
+    """Recebe o 'response' de um request e salva o conteudo num arquivo 'name' na pasta 'pasta' retorna True em caso de sucesso
+    Levanta uma exceção em caso de erro"""
+    
     pasta = str(pasta).replace('\\', '/')
     os.makedirs(pasta, exist_ok=True)
     
     with open(os.path.join(pasta, name), 'wb') as arq:
         for i in response.iter_content(100000):
             arq.write(i)
+
+
 _download_file = download_file
 
 
-# Recebe o indice da empresa atual da consulta e a quantidade total de empresas
-# Se não for a primeira empresa printa quantas faltam e pula 2 linhas
-# Printa o indice da empresa atual mais as infos da mesma
-def indice(count, total_empresas, empresa='', index=0, window=False, tempos=False, tempo_execucao=None, controle=None):
+def indice(count, total_empresas, empresa='', index=0, window=False, tempos=False, tempo_execucao=None, controle=None, usando_bd=False, nome_rotina='Rotina', mensagen_extra=''):
+    """ Função para mostrar qual empresa está sendo utilizada no andamento atual.
+        Calcula o tempo de execução para finalizar a rotina """
     try:
         total_empresas = len(total_empresas)
     except:
         pass
     
+    previsao_termino_texto = ''
     tempo_estimado_texto = ''
+    tempos_de_execucao = '[][]'
     tempo_estimado = 0
+    tempo_medio_texto = ''
     dados_rotina = ''
     
     # Cria um indice para saber qual linha dos dados está
-    indice_dados = f'[ {str(count + index)} de {str(total_empresas + index)} ]'
+    indice_dados = f'[ {mensagen_extra}{str(count + index - 1)} de {str(total_empresas + index)} | {str((total_empresas + index) - (count + index - 1))} Restantes ]'
     
+    # se tiver habilitado para calcular o tempo de execução
     if tempos:
         tempo_inicial = datetime.now()
         
@@ -710,7 +932,7 @@ def indice(count, total_empresas, empresa='', index=0, window=False, tempos=Fals
         tempos.pop(0)
         
         # verifica se o lista 'tempo_execucao' tem mais de 100 itens, se tiver, tira o primeiro para ficar somente os 100 mais recentes
-        if len(tempo_execucao) > 100:
+        if len(tempo_execucao) > 50:
             del (tempo_execucao[0])
         
         tempo_execucao.append(tempo_execucao_atual)
@@ -718,42 +940,32 @@ def indice(count, total_empresas, empresa='', index=0, window=False, tempos=Fals
             tempo_estimado = tempo_estimado + t
         tempo_estimado = int(tempo_estimado) / int(len(tempo_execucao))
         
+        # pega o tempo médio de cada execução em texto
+        if tempo_estimado > 0:
+            # Converter o tempo total para um objeto timedelta
+            tempo_medio = timedelta(seconds=tempo_estimado)
+            dias_texto, horas_texto, minutos_texto, segundos_texto = converte_tempo_em_texto(tempo_medio)
+            tempo_medio_texto = f"[ Tempo médio por ciclo: {dias_texto}{horas_texto}{minutos_texto}{segundos_texto} ]"
+        
         tempo_total_segundos = int((total_empresas + index) - (count + index) + 1) * int(tempo_estimado)
         tempo_estimado = tempo_execucao
         # Converter o tempo total para um objeto timedelta
         tempo_total = timedelta(seconds=tempo_total_segundos)
         
         # Extrair dias, horas e minutos do timedelta
-        dias = tempo_total.days
-        horas = tempo_total.seconds // 3600
-        minutos = (tempo_total.seconds % 3600) // 60
-        
-        # Retorna o tempo no formato "dias:horas:minutos:segundos"
-        dias_texto = ''
-        horas_texto = ''
-        minutos_texto = ''
-        
-        if dias == 1:
-            dias_texto = f' {dias} dia'
-        elif dias > 1:
-            dias_texto = f' {dias} dias'
-        if horas == 1:
-            horas_texto = f' {horas} hora'
-        elif horas > 1:
-            horas_texto = f' {horas} horas'
-        if minutos == 1:
-            minutos_texto = f' {minutos} minuto'
-        elif minutos > 1:
-            minutos_texto = f' {minutos} minutos'
+        dias, dias_texto, horas, horas_texto, minutos, minutos_texto, segundos, segundos_texto = converte_tempo_em_texto(tempo_total, retorna_texto_numero=True)
         
         if dias > 0 or horas > 0 or minutos > 0:
             previsao_termino = tempo_inicial + tempo_total
             # Retorna o tempo no formato "dias:horas:minutos:segundos"
-            tempo_estimado_texto = f" | Tempo estimado:{dias_texto}{horas_texto}{minutos_texto} | Previsão de termino: {previsao_termino.strftime('%d/%m/%Y as %H:%M')}"
-            
+            previsao_termino_texto = f"[ Previsão de termino: {previsao_termino.strftime('%d/%m/%Y as %H:%M')} ]"
+            tempo_estimado_texto = f"[ Tempo estimado: {dias_texto}{horas_texto}{minutos_texto} ]"
+            tempos_de_execucao = f'{tempo_estimado_texto}{previsao_termino_texto}'
+    
     if window:
+        # se tiver a barra de status, tenta atualiza-la
         while True:
-            status_2 = f'{str((count + index) - 1)} de {str(total_empresas + index)} | {str((total_empresas + index) - (count + index) + 1)} Restantes{tempo_estimado_texto}'
+            status_2 = f'{str((count + index) - 1)} de {str(total_empresas + index)} | {str((total_empresas + index) - (count + index) + 1)} Restantes{tempos_de_execucao}'
             try:
                 window['-Mensagens-'].update(status_2)
                 break
@@ -765,21 +977,79 @@ def indice(count, total_empresas, empresa='', index=0, window=False, tempos=Fals
                 print('>>> Erro ao atualizar a interface, tentando novamente...')
                 pass
     
-    if count > 1:
-        status_1 = f'[ {total_empresas - (count - 1)} Restantes ] {tempo_estimado_texto}\n\n'
-        print(status_1)
-        dados_rotina = indice_dados + status_1
-    
+    porcentagem = ((count + index) / (total_empresas + index)) * 100
+    dados_rotina = indice_dados + tempo_medio_texto + tempos_de_execucao + f'[ {int(porcentagem)}% ]'
     empresa = str(empresa).replace("('", '[ ').replace("')", ' ]').replace("',)", " ]").replace(',)', ' ]').replace("', '", ' - ')
     
-    print(f'{indice_dados} - {empresa}')
+    print(f'\n\n{dados_rotina}\n{empresa}')
     
+    # se for utilizar algúm metodo de monitoramento dos andamentos
     if controle:
-        with open(controle, 'w', encoding='utf-8') as f:
-            f.write(dados_rotina)
+        # se usar banco de dados, atualiza os andamentos nele
+        if usando_bd:
+            try:
+                _update_script_status(script_name=nome_rotina.replace('[', '').replace(']', '').strip(),
+                                      status='status-executando',
+                                      andamentos=indice_dados.replace('[', '').replace(']', '').strip(),
+                                      tempo_medio=tempo_medio_texto.replace('[', '').replace(']', '').strip(),
+                                      tempo_estimado=tempo_estimado_texto.replace('[', '').replace(']', '').strip(),
+                                      previsao_termino=previsao_termino_texto.replace('[', '').replace(']', '').strip(),
+                                      porcentagem=f'%{int(porcentagem)}')
+            except DatabaseError:
+                print("Erro ao conectar ao banco de dados do TaskWatch, verifique se o mesmo está em execução.")
+                pass
+            except:
+                traceback_str = traceback.format_exc()
+                print(traceback_str)
+                pass
+        
+        # se não usar banco de dados, atualiza o arquivo txt de controle
+        else:
+            if dados_rotina != '':
+                with open(controle, 'w', encoding='latin-1') as f:
+                    f.write(dados_rotina)
     
     return tempos, tempo_estimado
+
+
 _indice = indice
+
+
+def converte_tempo_em_texto(tempo_total, returna_numeros=False, retorna_texto_numero=False):
+    # Extrair dias, horas e minutos do timedelta
+    dias = tempo_total.days
+    horas = tempo_total.seconds // 3600
+    minutos = (tempo_total.seconds % 3600) // 60
+    segundos = tempo_total.seconds % 60
+    
+    dias_texto = ''
+    horas_texto = ''
+    minutos_texto = ''
+    segundos_texto = ''
+    
+    if dias == 1:
+        dias_texto = f'{dias} dia '
+    elif dias > 1:
+        dias_texto = f'{dias} dias '
+    if horas == 1:
+        horas_texto = f'{horas} hora '
+    elif horas > 1:
+        horas_texto = f'{horas} horas '
+    if minutos == 1:
+        minutos_texto = f'{minutos} minuto '
+    elif minutos > 1:
+        minutos_texto = f'{minutos} minutos '
+    if segundos == 1:
+        segundos_texto = f'{segundos} segundo'
+    elif segundos > 1:
+        segundos_texto = f'{segundos} segundos'
+    
+    if returna_numeros:
+        return dias, horas, minutos, segundos
+    if retorna_texto_numero:
+        return dias, dias_texto, horas, horas_texto, minutos, minutos_texto, segundos, segundos_texto
+    else:
+        return dias_texto, horas_texto, minutos_texto, segundos_texto
 
 
 def remove_emojis(text):
@@ -792,6 +1062,8 @@ def remove_emojis(text):
     text = emoji_pattern.sub(r'', text)
     text = text[0:-1]
     return text
+
+
 _remove_emojis = remove_emojis
 
 
@@ -800,11 +1072,13 @@ def remove_espacos(text):
     text = string.sub(r'', text)
     text = text[0:-1]
     return text
+
+
 _remove_espacos = remove_espacos
 
 
-# gera um número aleatório de 10 dígitos que não contem na lista
 def generate_random_number(lista_controle):
+    """ Gera um número aleatório de 10 dígitos que não contem na lista"""
     while True:
         controle = str(random.randint(10 ** 9, 10 ** 10 - 1))
         if controle not in lista_controle:
@@ -824,6 +1098,8 @@ def concatena(variavel, quantidade, posicao, caractere):
             variavel = str(caractere) + str(variavel)
     
     return variavel
+
+
 _concatena = concatena
 
 
@@ -838,12 +1114,83 @@ def _kill_process_by_name(process_name):
             pass
 
 
-def _divide_list(lst, n):
+def _divide_list(lst, n, total_empresas):
+    if total_empresas < 20:
+        n = 1
+    
     # Divide a lista em n partes
     k, m = divmod(len(lst), n)
-    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)], n
 
 
-def get_host_name():
+def _get_host_name():
     # Get the hostname of the machine
-    return socket.gethostname()
+    return str(socket.gethostname()).upper()
+
+
+def _envia_email(destinatario, andamentos, pasta_final, anexo, cc_list=False):
+    email = "roboautorobot@gmail.com"
+    senha_do_email = 'ymgwnihtsjcipfhv'
+    
+    msg = EmailMessage()  #
+    msg['Subject'] = f'Robô: {andamentos}'
+    msg['From'] = email
+    msg['To'] = destinatario
+    if cc_list:
+        msg['Cc'] = cc_list  # Adiciona destinatários em cópia
+    
+    cid = make_msgid()[1:-1]  # Gera um Content-ID único para a imagem
+    corpo_html = f'''<html>
+                        <body>
+                            <p>Olá, tenha um excelente dia.</p>
+                            <p>Realizamos a execução do processo automatizado <b>{andamentos}</b></p>
+                            <p>Os resultados estão no seguinte diretório: <b>{pasta_final}</b><br>
+                            Copie e cole esse caminho na barra de endereço do explorador de arquivos ou na barra de pesquisa do windows.</p>
+                            <p>Caso houver alguma particularidade na execução peço que nos responda este e-mail com o detalhamento dela.</p>
+                            <p>Todo processo automatizado é gerado a partir dos dados enviados, por se tratar de uma rotina automatizada não há intervenção humana além do tratamento dos dados. Por este motivo é necessária à conferência dos dados gerados pelo robô por parte do solicitante.</p>
+                            <p>Em caso de dúvida, continuo à sua disposição.</p>
+                            <p>Atenciosamente,</p>
+                            <img src="cid:{cid}" alt="Assinatura" />
+                        </body>
+                    </html>'''
+    
+    msg.set_content(corpo_html, subtype='html')
+    
+    # Adicionando a imagem embutida
+    with open('V:\\Setor Robô\\Scripts Python\\_comum\\Assets\\assinatura.png', 'rb') as img:
+        img_data = img.read()
+        msg.add_related(img_data, maintype='image', subtype='png', cid=cid)
+    
+    if anexo:
+        with open(anexo, 'rb') as anexo_file:
+            content = anexo_file.read()
+            filename = anexo.split('/')[-1]
+            msg.add_attachment(content, maintype='application', subtype='octet-stream', filename=filename)
+    
+    with SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(email, senha_do_email)
+        smtp.send_message(msg)
+
+
+def confere_data_arquivo(file_path):
+    """Confere se o arquivo foi criado ou modificado no dia anterior"""
+    
+    # Obtém o timestamp de criação do arquivo
+    timestamp_criacao = os.path.getmtime(file_path)
+    
+    # Converte o timestamp em um objeto datetime
+    data_criacao = datetime.fromtimestamp(timestamp_criacao)
+    
+    # Obtém a data e hora atuais
+    agora = datetime.now()
+    
+    # Calcula a diferença entre a data atual e a data de criação
+    diferenca = agora - data_criacao
+    
+    # Verifica se a diferença é maior que 24 horas
+    planilha_velha = diferenca > timedelta(hours=24)
+    
+    if planilha_velha:
+        return True
+    else:
+        return False
